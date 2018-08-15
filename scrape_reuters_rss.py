@@ -3,6 +3,7 @@ import time
 
 import feedparser
 import pandas as pd
+import numpy as np
 
 # ignored feeds that seemed to have no companies/stocks in them
 reuters_feed_list = {
@@ -43,21 +44,30 @@ def continually_scrape_rss():
         # convert timestamp to time since epoch so hdf can use it as index
         # feeds_df['published_parsed'] = feeds_df['published_parsed'].apply(lambda x: int(time.mktime(x)))
         # feeds_df.set_index('published_parsed', inplace=True)
-        feeds_df.index = feeds_df['link'].apply(lambda x: hash(x))
+        # feeds_df.index = feeds_df['link'].apply(lambda x: int(hashlib.md5(x.encode('utf-8')).hexdigest(), 16))
+        # feeds_df.reset_index(inplace=True)
 
         filename = 'reuters_raw_rss.h5'
         if os.path.exists(filename):
             # seems that only 20 stories can be returned from any feed max, so 10x20 = 200
             # but use feeds_df shape for more robust performance
             current_df = pd.read_hdf(filename, start=-feeds_df.shape[0])
+            current_df.reset_index(inplace=True, drop=True)
             mode = 'r+'
-            # chuck for duplicates
-            non_dupe_idxs = current_df.index != feeds_df.index
-            non_dupe_df = feeds_df[non_dupe_idxs]
-            if non_dupe_df.shape[0] != 0:
-                non_dupe_df.to_hdf(filename, 'raw_rss', mode='r+')
-                print(str(non_dupe_df.shape[0]), 'updates')
-            print('no updates')
+            # check for new stuff
+            df_all = feeds_df.merge(current_df, how='left', indicator=True)
+            new_entries_idx = df_all['_merge'] == 'left_only'
+            new_entries = new_entries_idx.sum()
+            print('\n')
+            if new_entries != 0:
+                new_df = df_all.loc[new_entries_idx]
+                new_df.drop('_merge', axis=1, inplace=True)
+                new_df.to_hdf(filename, 'raw_rss', mode='r+')
+                print(str(new_entries), 'updates')
+            else:
+                print('no updates')
+
+            print('\n')
         else:
             feeds_df.to_hdf(filename, 'raw_rss', mode='w')
 

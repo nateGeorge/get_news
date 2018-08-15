@@ -43,8 +43,6 @@ def continually_scrape_rss():
 
         filename = 'reuters_raw_rss.h5'
         if os.path.exists(filename):
-            # seems that only 20 stories can be returned from any feed max, so 10x20 = 200
-            # but use feeds_df shape for more robust performance
             current_df = pd.read_hdf(filename, start=-feeds_df.shape[0])
             current_df.reset_index(inplace=True, drop=True)
             mode = 'r+'

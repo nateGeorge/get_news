@@ -138,36 +138,3 @@ def load_nasdaq_stocklist():
     filename = 'nasdaq_stock_listing_' + date + '.csv'
     df = pd.read_csv(filename, index_col='ticker')
     return df
-
-# old try; no longer needed
-"""
-total_num_stocks = 0  # sanity check to make sure everything was grabbed
-# full_df = pd.DataFrame()  # initialize df for storing all stock data
-
-
-
-# for letter in tqdm(string.ascii_uppercase):
-#     print(letter)
-
-letter = 'A'
-page = ''
-# 1st row is labels
-full_df1, stocks_on_page, last_page_num = add_stocks(letter, page, get_last_page=True)
-total_num_stocks += stocks_on_page
-
-jobs = []
-with ThreadPoolExecutor() as executor:
-    for page in range(2, last_page_num + 1):
-        print(page)
-        r = executor.submit(add_stocks, letter, str(page))
-        jobs.append((page, r))
-        # df, stocks_on_page = add_stocks(letter, str(page), df, total_num_stocks)
-
-dfs = []
-for page, r in jobs:
-    cur_df, stocks_on_page = r.result()
-    dfs.append(cur_df)
-    total_num_stocks += stocks_on_page
-
-full_df = pd.concat([full_df] + dfs)
-"""

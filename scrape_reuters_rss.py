@@ -40,12 +40,6 @@ def continually_scrape_rss():
             all_feeds = all_feeds + [f for f in feeds['entries']]
 
         feeds_df = pd.io.json.json_normalize(all_feeds).dropna(axis=1)
-        # no longer using time as index, now it's hash of the link
-        # convert timestamp to time since epoch so hdf can use it as index
-        # feeds_df['published_parsed'] = feeds_df['published_parsed'].apply(lambda x: int(time.mktime(x)))
-        # feeds_df.set_index('published_parsed', inplace=True)
-        # feeds_df.index = feeds_df['link'].apply(lambda x: int(hashlib.md5(x.encode('utf-8')).hexdigest(), 16))
-        # feeds_df.reset_index(inplace=True)
 
         filename = 'reuters_raw_rss.h5'
         if os.path.exists(filename):

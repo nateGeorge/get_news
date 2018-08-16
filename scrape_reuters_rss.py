@@ -137,16 +137,20 @@ def load_rss():
     for c in ['time_added', 'published_parsed']:
         df[c] = df[c].dt.tz_convert('America/Denver')
 
+    return df
+
 
 
 # scraping stories
-link = df[df['category'] == 'tech'].iloc[0]['feedburner_origlink']
+df = load_rss()
+first_story = df[df['category'] == 'tech'].iloc[0]
+link = first_story['feedburner_origlink']
 res = req.get(link)
 soup = bs(res.content, 'lxml')
 header = soup.find('div', {'class': 'ArticleHeader_content-container'})
 datetime_str = soup.find('div', {'class': 'ArticleHeader_date'}).text.split('/')
 # with base requests, this should be in UTC/GMT
-article_datetime = pd.to_datetime(datetime[0].strip() + ' ' + datetime[1].strip()).tz_localize('UTC')
+article_datetime = pd.to_datetime(datetime_str[0].strip() + ' ' + datetime_str[1].strip()).tz_localize('UTC')
 body = soup.find('div', {'class': 'StandardArticleBody_body'}).text
 # clean up location and reporting agency
 loc_reporting_idx = body.find(' - ') + 3
@@ -165,6 +169,82 @@ elif 'Our Standards: ' in body:
     os_idx = body.find('Additional reporting')
     body = body[:os_idx].strip()
 
+
+# search for tickers in story
+# TODO: find CEOs, other important entities in story and get sentiment towards them too
+import re
+stocks_in_story = []
+stocks = re.findall('\([A-Z\.]+\)', body)  # tring to get full stock name: [A-Z[a-z\s]+]+
+if stocks is not None:
+    for s in stocks:
+        # remove RIC and paranthesis
+        per_idx = s.find('.')
+        stocks_in_story.append(s[1:per_idx])
+        # get full stock name
+
+# find all mentions of stocks in story
+import spacy
+from fuzzywuzzy import fuzz
+
+# nlp = spacy.load('en')
+nlp = spacy.load('en_core_web_lg')
+proc_doc = nlp(body)
+# get all mentions of stocks
+stocks_to_match = set(stocks_in_story)
+stocks_ents = {}
+full_stock_names = {}
+for ent in proc_doc.ents:
+    if len(stocks_to_match) != 0:
+        for r in ent.rights:
+            remove = None
+            for s in stocks_to_match:
+                if s in r.text:
+                    full_stock_names[s] = ent
+                    remove = s
+                    break
+            if remove is not None:
+                stocks_to_match.remove(remove)
+
+    for s, f in full_stock_names.items():
+        if f.text == ent.text or ent.text in f.text:
+            stocks_ents.setdefault(s, []).append(ent)
+        else:
+            ratio = fuzz.ratio(f.text, ent)
+            if ratio > 50:
+                stocks_ents.setdefault(s, []).append(ent)
+
+# TODO: search for company names without ticker in story
+
+
+# TODO: get sentiment towards entities (stocks)
+# possible tools for it:
+# https://github.com/D2KLab/sentinel
+# https://github.com/charlesashby/entity-sentiment-analysis
+
+
+# get overall document sentiment -- doesn't work super well with vader for whole document
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+def get_sentiments_vader(x, analyzer):
+    vs = analyzer.polarity_scores(x)
+    return pd.DataFrame([vs['compound'], vs['pos'], vs['neg'], vs['neu']], index=['compound', 'pos', 'neg', 'neu'])
+
+analyzer = SentimentIntensityAnalyzer()
+
+sentiments = get_sentiments_vader(body, analyzer)
+
+stocks_ents_sentiments = {}
+for s in stocks_ents.keys():
+    sentiments_list = []
+    for ent in stocks_ents[s]:
+        sentiments = get_sentiments_vader(ent.sent.text, analyzer)
+        sentiments_list.append(sentiments)
+
+    stocks_ents_sentiments[s] = pd.concat(sentiments_list, axis=1).T.reset_index().drop('index', axis=1)
+
+# TODO:
+# flog keywords: SEC, subpoena, sue, etc for negative
+# look for stock entity in title to find focus of story
 
 
 

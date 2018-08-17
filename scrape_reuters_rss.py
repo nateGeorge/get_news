@@ -9,16 +9,25 @@ quit: \q
 
 """
 
+# TODO: deal with companies without tickers in the story, e.g.
+# https://www.reuters.com/article/us-sprint-m-a-t-mobile/trump-advisor-touts-sprint-t-mobile-deal-while-denying-lobbying-idUSKBN1L01R4
+# Trump advisor touts Sprint, T-Mobile deal while denying lobbying
+
+import re
 import os
 import time
 from datetime import datetime
 
+import spacy
+from fuzzywuzzy import fuzz
 import requests as req
 from bs4 import BeautifulSoup as bs
 import feedparser
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine as ce
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
 
 # ignored feeds that seemed to have no companies/stocks in them
 reuters_feed_list = {
@@ -35,6 +44,15 @@ reuters_feed_list = {
                     }
 
 
+def create_engine():
+    # create connection
+    postgres_uname = os.environ.get('postgres_uname')
+    postgres_pass = os.environ.get('postgres_pass')
+    db = 'postgresql://{}:{}@localhost:5432/rss_feeds'.format(postgres_uname, postgres_pass)
+    engine = ce(db, echo=False)
+    return engine
+
+
 def continually_scrape_rss():
     # tried with sqlite first, but having trouble
     # 'sqlite://'
@@ -46,10 +64,7 @@ def continually_scrape_rss():
     # https://stackoverflow.com/a/8237512/4549682
     # run psql: https://www.digitalocean.com/community/tutorials/how-to-install-and-use-postgresql-on-ubuntu-16-04
     # create tables, users, etc: https://medium.com/coding-blocks/creating-user-database-and-adding-access-on-postgresql-8bfcd2f4a91e
-    postgres_uname = os.environ.get('postgres_uname')
-    postgres_pass = os.environ.get('postgres_pass')
-    db = 'postgresql://{}:{}@localhost:5432/rss_feeds'.format(postgres_uname, postgres_pass)
-    engine = create_engine(db, echo=False)
+    engine = create_engine()
     # create test table for sanity check
     # engine.execute("CREATE TABLE IF NOT EXISTS test();")
     while True:
@@ -121,10 +136,7 @@ def load_rss():
     """
     loads full sql database full of feedparser-parsed rss feeds
     """
-    postgres_uname = os.environ.get('postgres_uname')
-    postgres_pass = os.environ.get('postgres_pass')
-    db = 'postgresql://{}:{}@localhost:5432/rss_feeds'.format(postgres_uname, postgres_pass)
-    engine = create_engine(db, echo=False)
+    engine = create_engine()
     tablename = 'reuters_raw_rss'
     df = pd.read_sql(tablename, con=engine)
     print(df.shape)
@@ -140,111 +152,209 @@ def load_rss():
     return df
 
 
+def get_sentiments_vader(x, analyzer):
+    vs = analyzer.polarity_scores(x)
+    return pd.DataFrame([vs['compound'], vs['pos'], vs['neg'], vs['neu']], index=['compound', 'pos', 'neg', 'neu']).T
+
+
+def scrape_story(story_df):
+    """
+    pass in one slice of the raw rss dataframe
+
+    this grabs the stocks in the story, the overall sentiment, and cleans the body
+    then stores it in a sql database
+    """
+    # first check if story and sentiments in db, if so, skip that one
+
+    # scrape story details
+    link = story_df['feedburner_origlink']
+    res = req.get(link)
+    soup = bs(res.content, 'lxml')
+
+    # get published time, which seems to be more accurate than the rss feed's time
+    header = soup.find('div', {'class': 'ArticleHeader_content-container'})
+    datetime_str = soup.find('div', {'class': 'ArticleHeader_date'}).text.split('/')
+    # with base requests, this should be in UTC/GMT
+    article_datetime = pd.to_datetime(datetime_str[0].strip() + ' ' + datetime_str[1].strip()).tz_localize('UTC')
+
+    # get story body
+    body = soup.find('div', {'class': 'StandardArticleBody_body'}).text
+    # clean up location and reporting agency
+    loc_reporting_idx = body.find(' - ') + 3
+    body = body[loc_reporting_idx:]
+    # clean up boilerplate at the end
+    if 'Additional reporting by' in body:
+        ar_idx = body.find('Additional reporting')
+        body = body[:ar_idx].strip()
+    elif 'Writing by ' in body:
+        wb_idx = body.find('Additional reporting')
+        body = body[:wb_idx].strip()
+    elif 'Editing by ' in body:
+        eb_idx = body.find('Additional reporting')
+        body = body[:eb_idx].strip()
+    elif 'Our Standards: ' in body:
+        os_idx = body.find('Additional reporting')
+        body = body[:os_idx].strip()
+
+
+    # search for tickers in story
+    # TODO: find CEOs, other important entities in story and get sentiment towards them too
+
+    stocks_in_story = []
+    stocks = re.findall('\(A-Z+\.A-Z+\)', body)
+    if stocks is not None and len(stocks) > 0:
+        print('found stocks:')
+        for s in stocks:
+            print(s)
+            # remove RIC and paranthesis
+            per_idx = s.find('.')
+            stocks_in_story.append(s[1:per_idx])
+
+    # find all mentions of stocks in story and get full stock name
+
+
+    # nlp = spacy.load('en')
+    nlp = spacy.load('en_core_web_lg')
+    proc_doc = nlp(body)
+    # get all mentions of stocks
+    stocks_to_match = set(stocks_in_story)
+    stocks_ents = {}
+    full_stock_names = {}
+    for ent in proc_doc.ents:
+        if len(stocks_to_match) != 0:
+            for r in ent.rights:
+                remove = None
+                for s in stocks_to_match:
+                    if s in r.text:
+                        full_stock_names[s] = ent
+                        remove = s
+                        break
+                if remove is not None:
+                    stocks_to_match.remove(remove)
+
+        for s, f in full_stock_names.items():
+            if f.text == ent.text or ent.text in f.text:
+                stocks_ents.setdefault(s, []).append(ent)
+            else:
+                ratio = fuzz.ratio(f.text, ent)
+                if ratio > 50:
+                    stocks_ents.setdefault(s, []).append(ent)
+
+
+    # TODO: search for company names without ticker in story
+
+
+    # TODO: get sentiment towards entities (stocks)
+    # possible tools for it:
+    # https://github.com/D2KLab/sentinel
+    # https://github.com/charlesashby/entity-sentiment-analysis
+
+
+    # get overall document sentiment -- doesn't work super well with vader for whole document
+    analyzer = SentimentIntensityAnalyzer()
+
+    sentiments = get_sentiments_vader(body, analyzer)
+
+    stocks_ents_sentiments = {}
+    avg_stocks_ents_sents  = {}
+    for s in stocks_ents.keys():
+        sentiments_list = []
+        for ent in stocks_ents[s]:
+            temp_sentiments = get_sentiments_vader(ent.sent.text, analyzer)
+            sentiments_list.append(temp_sentiments)
+
+        stocks_ents_sentiments[s] = pd.concat(sentiments_list).reset_index().drop('index', axis=1)
+        avg_stocks_ents_sents[s] = stocks_ents_sentiments[s].mean()
+
+
+    # TODO:
+    # flog keywords: SEC, subpoena, sue, etc for negative
+    # look for stock entity in title to find focus of story
+
+    story_df_to_save = pd.Series({'feedburner_origlink': link,
+                            'datetime': article_datetime,
+                            'body': body,
+                            'stocks_in_story': ', '.join(stocks_in_story),
+                            # 'stocks_ents': stocks_ents,  # can't put dict in sql, and not sure want to save this anyway
+                            'overall_vader_compound': sentiments['compound'][0],
+                            'overall_vader_pos': sentiments['pos'][0],
+                            'overall_vader_neg': sentiments['neg'][0],
+                            'overall_vader_neu': sentiments['neu'][0]}).to_frame().T
+
+    # save to sql database
+    # create connection
+    engine = create_engine()
+
+    # save overall story details
+    tablename = 'reuters_story_bodies'
+    story_df_to_save.to_sql(tablename, con=engine, if_exists='append', index=False)
+
+
+    # TODO: email summary/save avg_stocks_ents_sents to db
+    # TODO: text/email alert if sentiment is highly positive or negative (> 0.5 or < -0.5)
+    # or if keyword in story like sue, subpoena, etc
+
+
+    # find any stocks in title; set these as focus of the story
+    stocks_in_title = 0
+    for s in stocks_in_story:
+        for ent in stocks_ents[s]:
+            if ent.text in story_df['title']:
+                stocks_in_title += 1
+                main_stock = s
+                break  # only match once per stock
+
+    if stocks_in_title == 1:
+        tablename = 'reuters_story_sentiments'
+        # save overall story sentiment and
+        sent_df = pd.Series({'feedburner_origlink': link,
+                            'ticker': main_stock,
+                            'overall_vader_compound': sentiments['compound'][0],
+                            'overall_vader_pos': sentiments['pos'][0],
+                            'overall_vader_neg': sentiments['neg'][0],
+                            'overall_vader_neu': sentiments['neu'][0],
+                            'sentence_vader_compound': avg_stocks_ents_sents[s]['compound'],
+                            'sentence_vader_pos': avg_stocks_ents_sents[s]['pos'],
+                            'sentence_vader_neg': avg_stocks_ents_sents[s]['neg'],
+                            'sentence_vader_neu': avg_stocks_ents_sents[s]['neu']}).to_frame().T
+        sent_df.to_sql(tablename, con=engine, if_exists='append', index=False)
+
 
 # scraping stories
 df = load_rss()
-first_story = df[df['category'] == 'tech'].iloc[0]
-link = first_story['feedburner_origlink']
-res = req.get(link)
-soup = bs(res.content, 'lxml')
-header = soup.find('div', {'class': 'ArticleHeader_content-container'})
-datetime_str = soup.find('div', {'class': 'ArticleHeader_date'}).text.split('/')
-# with base requests, this should be in UTC/GMT
-article_datetime = pd.to_datetime(datetime_str[0].strip() + ' ' + datetime_str[1].strip()).tz_localize('UTC')
-body = soup.find('div', {'class': 'StandardArticleBody_body'}).text
-# clean up location and reporting agency
-loc_reporting_idx = body.find(' - ') + 3
-body = body[loc_reporting_idx:]
-# clean up boilerplate at the end
-if 'Additional reporting by' in body:
-    ar_idx = body.find('Additional reporting')
-    body = body[:ar_idx].strip()
-elif 'Writing by ' in body:
-    wb_idx = body.find('Additional reporting')
-    body = body[:wb_idx].strip()
-elif 'Editing by ' in body:
-    eb_idx = body.find('Additional reporting')
-    body = body[:eb_idx].strip()
-elif 'Our Standards: ' in body:
-    os_idx = body.find('Additional reporting')
-    body = body[:os_idx].strip()
+
+for i, r in df.iterrows():
+    print(i)
+    print(r['title'])
+    scrape_story(r)
+#
+# story_df = df[df['category'] == 'tech'].iloc[0]
 
 
-# search for tickers in story
-# TODO: find CEOs, other important entities in story and get sentiment towards them too
-import re
-stocks_in_story = []
-stocks = re.findall('\([A-Z\.]+\)', body)  # tring to get full stock name: [A-Z[a-z\s]+]+
-if stocks is not None:
-    for s in stocks:
-        # remove RIC and paranthesis
-        per_idx = s.find('.')
-        stocks_in_story.append(s[1:per_idx])
-        # get full stock name
-
-# find all mentions of stocks in story
-import spacy
-from fuzzywuzzy import fuzz
-
-# nlp = spacy.load('en')
-nlp = spacy.load('en_core_web_lg')
-proc_doc = nlp(body)
-# get all mentions of stocks
-stocks_to_match = set(stocks_in_story)
-stocks_ents = {}
-full_stock_names = {}
-for ent in proc_doc.ents:
-    if len(stocks_to_match) != 0:
-        for r in ent.rights:
-            remove = None
-            for s in stocks_to_match:
-                if s in r.text:
-                    full_stock_names[s] = ent
-                    remove = s
-                    break
-            if remove is not None:
-                stocks_to_match.remove(remove)
-
-    for s, f in full_stock_names.items():
-        if f.text == ent.text or ent.text in f.text:
-            stocks_ents.setdefault(s, []).append(ent)
-        else:
-            ratio = fuzz.ratio(f.text, ent)
-            if ratio > 50:
-                stocks_ents.setdefault(s, []).append(ent)
-
-# TODO: search for company names without ticker in story
 
 
-# TODO: get sentiment towards entities (stocks)
-# possible tools for it:
-# https://github.com/D2KLab/sentinel
-# https://github.com/charlesashby/entity-sentiment-analysis
+def load_story_df(remove_dupes=False):
+    engine = create_engine()
+    tablename = 'reuters_story_bodies'
+    story_df = pd.read_sql(tablename, con=engine)
+    if remove_dupes:
+        story_df.drop_duplicates(inplace=True)
+        engine.execute('DROP TABLE IF EXISTS ' + tablename)
+        story_df.to_sql(tablename, con=engine, index=False)
+
+    return story_df
 
 
-# get overall document sentiment -- doesn't work super well with vader for whole document
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+def load_sent_df(remove_dupes=False):
+    engine = create_engine()
+    tablename = 'reuters_story_sentiments'
+    sent_df = pd.read_sql(tablename, con=engine)
+    if remove_dupes:
+        sent_df.drop_duplicates(inplace=True)
+        engine.execute('DROP TABLE IF EXISTS ' + tablename)
+        sent_df.to_sql(tablename, con=engine, index=False)
 
-def get_sentiments_vader(x, analyzer):
-    vs = analyzer.polarity_scores(x)
-    return pd.DataFrame([vs['compound'], vs['pos'], vs['neg'], vs['neu']], index=['compound', 'pos', 'neg', 'neu'])
-
-analyzer = SentimentIntensityAnalyzer()
-
-sentiments = get_sentiments_vader(body, analyzer)
-
-stocks_ents_sentiments = {}
-for s in stocks_ents.keys():
-    sentiments_list = []
-    for ent in stocks_ents[s]:
-        sentiments = get_sentiments_vader(ent.sent.text, analyzer)
-        sentiments_list.append(sentiments)
-
-    stocks_ents_sentiments[s] = pd.concat(sentiments_list, axis=1).T.reset_index().drop('index', axis=1)
-
-# TODO:
-# flog keywords: SEC, subpoena, sue, etc for negative
-# look for stock entity in title to find focus of story
+    return story_df
 
 
 

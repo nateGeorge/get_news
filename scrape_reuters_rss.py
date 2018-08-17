@@ -164,7 +164,7 @@ def scrape_story(story_df):
     this grabs the stocks in the story, the overall sentiment, and cleans the body
     then stores it in a sql database
     """
-    # first check if story and sentiments in db, if so, skip that one
+    # TODO: first check if story and sentiments in db, if so, skip that one
 
     # scrape story details
     link = story_df['feedburner_origlink']
@@ -201,7 +201,7 @@ def scrape_story(story_df):
     # TODO: find CEOs, other important entities in story and get sentiment towards them too
 
     stocks_in_story = []
-    stocks = re.findall('\(A-Z+\.A-Z+\)', body)
+    stocks = re.findall('\([A-Z]+\.[A-Z]+\)', body)
     if stocks is not None and len(stocks) > 0:
         print('found stocks:')
         for s in stocks:
@@ -323,7 +323,12 @@ def scrape_story(story_df):
 # scraping stories
 df = load_rss()
 
+# 246 temporarily unavailable
+# TABLE-U.S. fund investors move cash to foreign stocks, most since May -ICI
+# https://www.reuters.com/article/usa-mutualfunds-ici/table-u-s-fund-investors-move-cash-to-foreign-stocks-most-since-may-ici-idUSL1N1V60YX?feedType=RSS&feedName=companyNews
 for i, r in df.iterrows():
+    if i == 246:
+        continue
     print(i)
     print(r['title'])
     scrape_story(r)

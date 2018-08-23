@@ -28,6 +28,8 @@ import numpy as np
 from sqlalchemy import create_engine as ce
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+# nlp = spacy.load('en')
+nlp = spacy.load('en_core_web_lg')
 
 # ignored feeds that seemed to have no companies/stocks in them
 reuters_feed_list = {
@@ -95,7 +97,7 @@ def continually_scrape_rss():
         # sqlite way
         # stmt = "select count(*) from sqlite_master where type='table' and name='{}'".format(tablename)
         # stmt = 'select exists(select * from information_schema.tables where table_name={})'.format(tablename)
-        stmt = "select exists(select relname from pg_class where relname='" + tablename + "')"
+        stmt = "select exists(select relname from pg_class where relname='" + tablename + "');"
         res = engine.execute(stmt)
         table_exists = res.fetchone()[0]
         if table_exists:
@@ -125,7 +127,7 @@ def continually_scrape_rss():
         else:
             print('writing new table')
             # to delete table:
-            # engine.execute('DROP TABLE reuters_raw_rss')
+            # engine.execute('DROP TABLE reuters_raw_rss;')
             feeds_df.to_sql(tablename, con=engine, index=False)
 
         print('finished, waiting one minute...\n\n')
@@ -164,37 +166,75 @@ def scrape_story(story_df):
     this grabs the stocks in the story, the overall sentiment, and cleans the body
     then stores it in a sql database
     """
-    # TODO: first check if story and sentiments in db, if so, skip that one
+    link = story_df['feedburner_origlink']
+
+    # first check if story and sentiments in db, if so, skip that one
+    tablename = 'reuters_story_bodies'
+    # check if already in DBs
+    tableexists = engine.execute("SELECT to_regclass('" + tablename + "');")
+    body_table_exists = tableexists.fetchone()[0]
+    in_body_db = None
+    # if table exists, check if entry is in DB
+    if body_table_exists is not None:
+        indb = engine.execute('select 1 from ' + tablename + ' where feedburner_origlink = \'' + link + '\';')
+        in_body_db = indb.fetchone()
+        if in_body_db is not None:
+            in_body_db = in_body_db[0]
+
+    # DB for sentence-level sentiment if stock in title
+    tablename = 'reuters_story_sentiments'
+    # check if already in DB
+    tableexists = engine.execute("SELECT to_regclass('" + tablename + "');")
+    sent_table_exists = tableexists.fetchone()[0]
+    in_sent_db = None
+    # if table exists, check if entry is in DB
+    if sent_table_exists is not None:
+        indb = engine.execute('select body from ' + tablename + ' where feedburner_origlink = \'' + link + '\';')
+        in_sent_db = indb.fetchone()
+        if in_sent_db is not None:
+            in_sent_db = int_sent_db[0]
+
+
+    if in_body_db is not None and in_sent_db is not None:
+        print('already in both DBs')
+        return
 
     # scrape story details
-    link = story_df['feedburner_origlink']
-    res = req.get(link)
-    soup = bs(res.content, 'lxml')
+    tablename = 'reuters_story_bodies'
+    if in_body_db is None:
+        res = req.get(link)
+        if res.status_code == 500:
+            print('status code 500; page unavailable')
+            return
+        soup = bs(res.content, 'lxml')
+        # get published time, which seems to be more accurate than the rss feed's time
+        header = soup.find('div', {'class': 'ArticleHeader_content-container'})
+        datetime_str = soup.find('div', {'class': 'ArticleHeader_date'}).text.split('/')
+        # with base requests, this should be in UTC/GMT
+        article_datetime = pd.to_datetime(datetime_str[0].strip() + ' ' + datetime_str[1].strip()).tz_localize('UTC')
 
-    # get published time, which seems to be more accurate than the rss feed's time
-    header = soup.find('div', {'class': 'ArticleHeader_content-container'})
-    datetime_str = soup.find('div', {'class': 'ArticleHeader_date'}).text.split('/')
-    # with base requests, this should be in UTC/GMT
-    article_datetime = pd.to_datetime(datetime_str[0].strip() + ' ' + datetime_str[1].strip()).tz_localize('UTC')
+        # get story body
+        body = soup.find('div', {'class': 'StandardArticleBody_body'}).text
+        # clean up location and reporting agency
+        loc_reporting_idx = body.find(' - ') + 3
+        body = body[loc_reporting_idx:]
+        # clean up boilerplate at the end
+        if 'Additional reporting by' in body:
+            ar_idx = body.find('Additional reporting')
+            body = body[:ar_idx].strip()
+        elif 'Writing by ' in body:
+            wb_idx = body.find('Additional reporting')
+            body = body[:wb_idx].strip()
+        elif 'Editing by ' in body:
+            eb_idx = body.find('Additional reporting')
+            body = body[:eb_idx].strip()
+        elif 'Our Standards: ' in body:
+            os_idx = body.find('Additional reporting')
+            body = body[:os_idx].strip()
+    else:
+        body_query = engine.execute('select body from ' + tablename + ' where feedburner_origlink = \'' + link + '\';')
+        body = body_query.fetchone()[0]
 
-    # get story body
-    body = soup.find('div', {'class': 'StandardArticleBody_body'}).text
-    # clean up location and reporting agency
-    loc_reporting_idx = body.find(' - ') + 3
-    body = body[loc_reporting_idx:]
-    # clean up boilerplate at the end
-    if 'Additional reporting by' in body:
-        ar_idx = body.find('Additional reporting')
-        body = body[:ar_idx].strip()
-    elif 'Writing by ' in body:
-        wb_idx = body.find('Additional reporting')
-        body = body[:wb_idx].strip()
-    elif 'Editing by ' in body:
-        eb_idx = body.find('Additional reporting')
-        body = body[:eb_idx].strip()
-    elif 'Our Standards: ' in body:
-        os_idx = body.find('Additional reporting')
-        body = body[:os_idx].strip()
 
 
     # search for tickers in story
@@ -213,8 +253,9 @@ def scrape_story(story_df):
     # find all mentions of stocks in story and get full stock name
 
 
-    # nlp = spacy.load('en')
-    nlp = spacy.load('en_core_web_lg')
+    # get list of entity names (stocks_ents) used for stocks in story, so can get sentences with stocks mentioned in them
+    # also get full stock names in full_stock_names
+
     proc_doc = nlp(body)
     # get all mentions of stocks
     stocks_to_match = set(stocks_in_story)
@@ -222,21 +263,28 @@ def scrape_story(story_df):
     full_stock_names = {}
     for ent in proc_doc.ents:
         if len(stocks_to_match) != 0:
+            for s in stocks_to_match:
+                if s in ent.text:
+                    # sometimes the entity also has ticker, e.g.  Xcel Energy Inc (XEL.O
+                    # clean stock from entity
+                    cleaned_stock_name = re.sub('\([A-Z]+\.[A-Z]+\)*', '', ent.text).strip()
+                    full_stock_names[s] = cleaned_stock_name
+
             for r in ent.rights:
                 remove = None
                 for s in stocks_to_match:
                     if s in r.text:
-                        full_stock_names[s] = ent
+                        full_stock_names[s] = ent.text
                         remove = s
                         break
                 if remove is not None:
                     stocks_to_match.remove(remove)
 
         for s, f in full_stock_names.items():
-            if f.text == ent.text or ent.text in f.text:
+            if f == ent.text or ent.text in f:
                 stocks_ents.setdefault(s, []).append(ent)
             else:
-                ratio = fuzz.ratio(f.text, ent)
+                ratio = fuzz.ratio(f, ent.text)
                 if ratio > 50:
                     stocks_ents.setdefault(s, []).append(ent)
 
@@ -270,24 +318,20 @@ def scrape_story(story_df):
     # TODO:
     # flog keywords: SEC, subpoena, sue, etc for negative
     # look for stock entity in title to find focus of story
+    if in_body_db is None:
+        story_df_to_save = pd.Series({'feedburner_origlink': link,
+                                'datetime': article_datetime,
+                                'body': body,
+                                'stocks_in_story': ', '.join(stocks_in_story),
+                                # 'stocks_ents': stocks_ents,  # can't put dict in sql, and not sure want to save this anyway
+                                'overall_vader_compound': sentiments['compound'][0],
+                                'overall_vader_pos': sentiments['pos'][0],
+                                'overall_vader_neg': sentiments['neg'][0],
+                                'overall_vader_neu': sentiments['neu'][0]}).to_frame().T
 
-    story_df_to_save = pd.Series({'feedburner_origlink': link,
-                            'datetime': article_datetime,
-                            'body': body,
-                            'stocks_in_story': ', '.join(stocks_in_story),
-                            # 'stocks_ents': stocks_ents,  # can't put dict in sql, and not sure want to save this anyway
-                            'overall_vader_compound': sentiments['compound'][0],
-                            'overall_vader_pos': sentiments['pos'][0],
-                            'overall_vader_neg': sentiments['neg'][0],
-                            'overall_vader_neu': sentiments['neu'][0]}).to_frame().T
-
-    # save to sql database
-    # create connection
-    engine = create_engine()
-
-    # save overall story details
-    tablename = 'reuters_story_bodies'
-    story_df_to_save.to_sql(tablename, con=engine, if_exists='append', index=False)
+        # save to sql database
+        # save overall story details
+        story_df_to_save.to_sql(tablename, con=engine, if_exists='append', index=False)
 
 
     # TODO: email summary/save avg_stocks_ents_sents to db
@@ -298,40 +342,46 @@ def scrape_story(story_df):
     # find any stocks in title; set these as focus of the story
     stocks_in_title = 0
     for s in stocks_in_story:
+        # sometimes entity detection doesn't detect the stock
+        if s not in stocks_ents.keys():
+            continue
+
         for ent in stocks_ents[s]:
             if ent.text in story_df['title']:
                 stocks_in_title += 1
                 main_stock = s
                 break  # only match once per stock
 
-    if stocks_in_title == 1:
+    if stocks_in_title == 1 and sent_table_exists is not None:
         tablename = 'reuters_story_sentiments'
-        # save overall story sentiment and
-        sent_df = pd.Series({'feedburner_origlink': link,
-                            'ticker': main_stock,
-                            'overall_vader_compound': sentiments['compound'][0],
-                            'overall_vader_pos': sentiments['pos'][0],
-                            'overall_vader_neg': sentiments['neg'][0],
-                            'overall_vader_neu': sentiments['neu'][0],
-                            'sentence_vader_compound': avg_stocks_ents_sents[s]['compound'],
-                            'sentence_vader_pos': avg_stocks_ents_sents[s]['pos'],
-                            'sentence_vader_neg': avg_stocks_ents_sents[s]['neg'],
-                            'sentence_vader_neu': avg_stocks_ents_sents[s]['neu']}).to_frame().T
-        sent_df.to_sql(tablename, con=engine, if_exists='append', index=False)
+        if in_sent_db is None:
+            # save overall story sentiment if not already in db
+            sent_df = pd.Series({'feedburner_origlink': link,
+                                'ticker': main_stock,
+                                'overall_vader_compound': sentiments['compound'][0],
+                                'overall_vader_pos': sentiments['pos'][0],
+                                'overall_vader_neg': sentiments['neg'][0],
+                                'overall_vader_neu': sentiments['neu'][0],
+                                'sentence_vader_compound': avg_stocks_ents_sents[s]['compound'],
+                                'sentence_vader_pos': avg_stocks_ents_sents[s]['pos'],
+                                'sentence_vader_neg': avg_stocks_ents_sents[s]['neg'],
+                                'sentence_vader_neu': avg_stocks_ents_sents[s]['neu']}).to_frame().T
+            sent_df.to_sql(tablename, con=engine, if_exists='append', index=False)
 
 
-# scraping stories
-df = load_rss()
-
-# 246 temporarily unavailable
-# TABLE-U.S. fund investors move cash to foreign stocks, most since May -ICI
-# https://www.reuters.com/article/usa-mutualfunds-ici/table-u-s-fund-investors-move-cash-to-foreign-stocks-most-since-may-ici-idUSL1N1V60YX?feedType=RSS&feedName=companyNews
-for i, r in df.iterrows():
-    if i == 246:
-        continue
-    print(i)
-    print(r['title'])
-    scrape_story(r)
+# # scraping stories
+# df = load_rss()
+# #
+# # # 246 temporarily unavailable
+# # # TABLE-U.S. fund investors move cash to foreign stocks, most since May -ICI
+# # # https://www.reuters.com/article/usa-mutualfunds-ici/table-u-s-fund-investors-move-cash-to-foreign-stocks-most-since-may-ici-idUSL1N1V60YX?feedType=RSS&feedName=companyNews
+engine = create_engine()
+# for i, r in df.iterrows():
+#     if i == 246:
+#         continue
+#     print(i)
+#     print(r['title'])
+#     scrape_story(r, engine)
 #
 # story_df = df[df['category'] == 'tech'].iloc[0]
 
@@ -344,7 +394,7 @@ def load_story_df(remove_dupes=False):
     story_df = pd.read_sql(tablename, con=engine)
     if remove_dupes:
         story_df.drop_duplicates(inplace=True)
-        engine.execute('DROP TABLE IF EXISTS ' + tablename)
+        engine.execute('DROP TABLE IF EXISTS ' + tablename + ';')
         story_df.to_sql(tablename, con=engine, index=False)
 
     return story_df
@@ -356,7 +406,7 @@ def load_sent_df(remove_dupes=False):
     sent_df = pd.read_sql(tablename, con=engine)
     if remove_dupes:
         sent_df.drop_duplicates(inplace=True)
-        engine.execute('DROP TABLE IF EXISTS ' + tablename)
+        engine.execute('DROP TABLE IF EXISTS ' + tablename + ';')
         sent_df.to_sql(tablename, con=engine, index=False)
 
     return story_df

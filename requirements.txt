@@ -1,0 +1,3 @@
+fuzzywuzzy
+sqlalchemy
+python-Levenshtein

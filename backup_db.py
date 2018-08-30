@@ -7,6 +7,11 @@ pg_dump -U nate rss_feeds > rss_feeds.pgsql
 
 to load:
 
+first create db
+login like in scrape_reuters_rss.py
+
+CREATE DATABASE rss_feeds;
+
 psql -U nate rss_feeds < rss_feeds.pgsql
 """
 

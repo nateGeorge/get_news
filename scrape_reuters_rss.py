@@ -7,6 +7,8 @@ use a db: \c dbname
 list tables: \d
 quit: \q
 
+
+
 """
 
 # TODO: deal with companies without tickers in the story, e.g.

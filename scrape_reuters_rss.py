@@ -75,10 +75,17 @@ def continually_scrape_rss():
         all_feeds = []
         for l, f in reuters_feed_list.items():
             print(l)
-            feeds = feedparser.parse(f)
-            if feeds['status'] != 200:
-                print('status is not good:', str(feeds['status']) + '; exiting')
-                break
+            complete = False
+            while not complete:
+                try:
+                    feeds = feedparser.parse(f)
+                    if feeds['status'] != 200:
+                        print('status is not good:', str(feeds['status']))
+                    else:
+                        complete = True
+                except KeyError:
+                    print('keyerror, probably a bad html request or something')
+                    time.sleep(3)
 
             for feed in feeds['entries']:
                 feed['category'] = l

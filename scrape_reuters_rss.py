@@ -20,6 +20,8 @@ import os
 import time
 from datetime import datetime
 
+import pytz
+import glob
 import spacy
 from fuzzywuzzy import fuzz
 import requests as req
@@ -421,9 +423,80 @@ def load_sent_df(remove_dupes=False):
     return story_df
 
 
+def backup_db():
+    """
+    exports backup of database
+    """
+    tz = pytz.timezone('US/Eastern')
+    todays_date_eastern = datetime.now(tz).strftime('%m-%d-%Y')
+    filename = '/home/nate/Dropbox/data/postgresql/rss_feeds/rss_feeds.{}.pgsql'.format(todays_date_eastern)
+
+    pg_pass = os.environ.get('postgres_pass')
+    os.system('export PGPASSWORD=' + pg_pass)
+    os.system('pg_dump -U nate rss_feeds > ' + filename)
+    # remove old files
+    list_of_files = glob.glob('/home/nate/Dropbox/data/postgresql/rss_feeds/*.pgsql')
+    latest_file = max(list_of_files, key=os.path.getctime)
+    for f in list_of_files:
+        if f != latest_file:
+            os.remove(f)
+
+
+def restore_db(engine, merge=True):
+    """
+    restores db from backup; if merge=True, then will merge with existing data
+
+    args:
+    engine -- sqlalchemy connection engine
+    merge -- if True, will only add rows that don't exist
+        otherwise drops old table and replaces with new
+    """
+
+    list_of_files = glob.glob('/home/nate/Dropbox/data/postgresql/rss_feeds/*.pgsql')
+    latest_file = max(list_of_files, key=os.path.getctime)
+    # engine.execute('create database rss_feeds_restore;')
+    # create db
+    # https://stackoverflow.com/a/8977109/4549682
+    postgres_uname = os.environ.get('postgres_uname')
+    postgres_pass = os.environ.get('postgres_pass')
+    db = 'postgresql://{}:{}@/postgres'.format(postgres_uname, postgres_pass)
+    create_engine = ce(db)
+    conn = create_engine.connect()
+    conn.execute("commit")
+    conn.execute("create database rss_feeds_restore")
+    os.system('psql -U nate rss_feeds_restore < {}'.format(latest_file))
+
+    if merge:
+        db = 'postgresql://{}:{}@/rss_feeds_restore'.format(postgres_uname, postgres_pass)
+        restore_engine = ce(db)
+        # rename table so we can copy it over
+        restore_engine.execute('ALTER TABLE reuters_raw_rss RENAME TO reuters_raw_rss_bkup')
+        restore_engine.dispose()
+        # https://stackoverflow.com/a/16708680/4549682
+        # copy from restore db to original
+        os.system('pg_dump -t reuters_raw_rss_bkup rss_feeds_restore | psql rss_feeds')
+        # now using original engine for rss_feeds db
+        # only copy rows that don't exist
+        engine.execute("""CREATE TABLE reuters_raw_rss_new AS
+                            SELECT * FROM reuters_raw_rss
+                            UNION
+                            SELECT * FROM reuters_raw_rss_bkup""")
+        engine.execute('DROP TABLE reuters_raw_rss_bkup')
+        engine.execute('DROP TABLE reuters_raw_rss')
+        engine.execute('ALTER TABLE reuters_raw_rss_new RENAME TO reuters_raw_rss;')
+
+        # drop backup db
+        conn.execute("commit")
+        conn.execute('DROP DATABASE rss_feeds_restore')
+    else:
+        print('method for not merging not implemented yet')
+
+    conn.close()
+
 
 if __name__ == "__main__":
-    continually_scrape_rss()
+    pass
+    # continually_scrape_rss()
 
 # to convert timezone
 """

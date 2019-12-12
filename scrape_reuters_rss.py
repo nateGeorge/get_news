@@ -32,6 +32,9 @@ import numpy as np
 from sqlalchemy import create_engine as ce
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+# directory for storing backups of database
+DATA_DIR = '/home/nate/Dropbox/data/postgresql/rss_feeds/'
+
 # nlp = spacy.load('en')
 nlp = spacy.load('en_core_web_lg')
 
@@ -50,13 +53,17 @@ reuters_feed_list = {
                     }
 
 
-def create_engine():
+def create_engine(db_name='rss_feeds'):
     # create connection
     postgres_uname = os.environ.get('postgres_uname')
     postgres_pass = os.environ.get('postgres_pass')
-    db = 'postgresql://{}:{}@localhost:5432/rss_feeds'.format(postgres_uname, postgres_pass)
+    db = 'postgresql://{}:{}@localhost:5432/{}'.format(postgres_uname, postgres_pass, db_name)
     engine = ce(db, echo=False)
     return engine
+
+
+# create SQL engine for connecting to DB
+engine = create_engine()
 
 
 def continually_scrape_rss():
@@ -149,7 +156,7 @@ def load_rss():
     """
     loads full sql database full of feedparser-parsed rss feeds
     """
-    engine = create_engine()
+    engine = create_engine(db_name='rss_feeds')
     tablename = 'reuters_raw_rss'
     df = pd.read_sql(tablename, con=engine)
     print(df.shape)
@@ -157,10 +164,10 @@ def load_rss():
     print(df.shape)
     # set timezone and convert to Mountain time
     # published_parsed is wrong
-    df['time_added'] = df['time_added'].dt.tz_localize('UTC')
-    df['published_parsed'] = pd.to_datetime(df['published']).dt.tz_localize('UTC')
-    for c in ['time_added', 'published_parsed']:
-        df[c] = df[c].dt.tz_convert('America/Denver')
+    #df['time_added'] = df['time_added'].dt.tz_localize('UTC')
+    #df['published_parsed'] = pd.to_datetime(df['published']).dt.tz_localize('UTC')
+    # for c in ['time_added', 'published_parsed']:
+    #     df[c] = df[c].dt.tz_convert('America/Denver')
 
     return df
 
@@ -380,23 +387,14 @@ def scrape_story(story_df):
             sent_df.to_sql(tablename, con=engine, if_exists='append', index=False)
 
 
-# # scraping stories
-# df = load_rss()
-# #
-# # # 246 temporarily unavailable
-# # # TABLE-U.S. fund investors move cash to foreign stocks, most since May -ICI
-# # # https://www.reuters.com/article/usa-mutualfunds-ici/table-u-s-fund-investors-move-cash-to-foreign-stocks-most-since-may-ici-idUSL1N1V60YX?feedType=RSS&feedName=companyNews
-engine = create_engine()
-# for i, r in df.iterrows():
-#     if i == 246:
-#         continue
-#     print(i)
-#     print(r['title'])
-#     scrape_story(r, engine)
-#
-# story_df = df[df['category'] == 'tech'].iloc[0]
+def scrape_all_stories(rss_df):
+    """
+    takes rss_df from load_rss() and scrapes the story text and gets sentiment for each
 
-
+    scrape_story() only scrapes the story if it's not already in the DB
+    """
+    for i, r in rss_df.iterrows():
+        scrape_story(r)
 
 
 def load_story_df(remove_dupes=False):
@@ -409,6 +407,14 @@ def load_story_df(remove_dupes=False):
         story_df.to_sql(tablename, con=engine, index=False)
 
     return story_df
+
+
+def export_story_df(filename='story_df.ft'):
+    """
+    export story_df to a feather file for fast and easy loading
+    """
+    df = load_story_df()
+    df.to_feather(filename)
 
 
 def load_sent_df(remove_dupes=False):
@@ -429,46 +435,47 @@ def backup_db():
     """
     tz = pytz.timezone('US/Eastern')
     todays_date_eastern = datetime.now(tz).strftime('%m-%d-%Y')
-    filename = '/home/nate/Dropbox/data/postgresql/rss_feeds/rss_feeds.{}.pgsql'.format(todays_date_eastern)
+    filename = DATA_DIR + 'rss_feeds.{}.pgsql'.format(todays_date_eastern)
 
     pg_pass = os.environ.get('postgres_pass')
+    postgres_uname = os.environ.get('postgres_uname')
     os.system('export PGPASSWORD=' + pg_pass)
-    os.system('pg_dump -U nate rss_feeds > ' + filename)
+    os.system('pg_dump -U {} rss_feeds > '.format(postgres_uname) + filename)
     # remove old files
-    list_of_files = glob.glob('/home/nate/Dropbox/data/postgresql/rss_feeds/*.pgsql')
+    list_of_files = glob.glob(DATA_DIR + '*.pgsql')
     latest_file = max(list_of_files, key=os.path.getctime)
     for f in list_of_files:
         if f != latest_file:
             os.remove(f)
 
 
-def restore_db(engine, merge=True):
+def restore_db(filename=None, merge=True):
     """
     restores db from backup; if merge=True, then will merge with existing data
 
     args:
     engine -- sqlalchemy connection engine
+    filename -- specific filename for backup; e.g. /home/nate/Downloads/rss_feeds.01-18-2019.pgsql
     merge -- if True, will only add rows that don't exist
         otherwise drops old table and replaces with new
     """
-
-    list_of_files = glob.glob('/home/nate/Dropbox/data/postgresql/rss_feeds/*.pgsql')
-    latest_file = max(list_of_files, key=os.path.getctime)
+    # get latest file in data directory if it's not specified
+    if filename==None:
+        list_of_files = glob.glob(DATA_DIR + '*.pgsql')
+        filename = max(list_of_files, key=os.path.getctime)
     # engine.execute('create database rss_feeds_restore;')
     # create db
     # https://stackoverflow.com/a/8977109/4549682
     postgres_uname = os.environ.get('postgres_uname')
     postgres_pass = os.environ.get('postgres_pass')
-    db = 'postgresql://{}:{}@/postgres'.format(postgres_uname, postgres_pass)
-    create_engine = ce(db)
-    conn = create_engine.connect()
+    engine = create_engine(db_name='postgres')
+    conn = engine.connect()
     conn.execute("commit")
-    conn.execute("create database rss_feeds_restore")
-    os.system('psql -U nate rss_feeds_restore < {}'.format(latest_file))
 
     if merge:
-        db = 'postgresql://{}:{}@/rss_feeds_restore'.format(postgres_uname, postgres_pass)
-        restore_engine = ce(db)
+        conn.execute("create database rss_feeds_restore")
+        os.system('psql -U {} rss_feeds_restore < {}'.format(postgres_uname, filename))
+        restore_engine = create_engine(db_name='rss_feeds_restore')
         # rename table so we can copy it over
         restore_engine.execute('ALTER TABLE reuters_raw_rss RENAME TO reuters_raw_rss_bkup')
         restore_engine.dispose()
@@ -489,13 +496,32 @@ def restore_db(engine, merge=True):
         conn.execute("commit")
         conn.execute('DROP DATABASE rss_feeds_restore')
     else:
-        print('method for not merging not implemented yet')
+        conn.execute("CREATE DATABASE rss_feeds")
+        os.system('psql -U {} rss_feeds < {}'.format(postgres_uname, filename))
 
     conn.close()
 
 
+# # scraping stories
+# df = load_rss()
+# #
+# # # 246 temporarily unavailable
+# # # TABLE-U.S. fund investors move cash to foreign stocks, most since May -ICI
+# # # https://www.reuters.com/article/usa-mutualfunds-ici/table-u-s-fund-investors-move-cash-to-foreign-stocks-most-since-may-ici-idUSL1N1V60YX?feedType=RSS&feedName=companyNews
+
+# for i, r in df.iterrows():
+#     if i == 246:
+#         continue
+#     print(i)
+#     print(r['title'])
+#     scrape_story(r, engine)
+#
+# story_df = df[df['category'] == 'tech'].iloc[0]
+
+
 if __name__ == "__main__":
-    continually_scrape_rss()
+    pass
+    #continually_scrape_rss()
 
 # to convert timezone
 """

@@ -520,8 +520,7 @@ def restore_db(filename=None, merge=True):
 
 
 if __name__ == "__main__":
-    pass
-    #continually_scrape_rss()
+    continually_scrape_rss()
 
 # to convert timezone
 """

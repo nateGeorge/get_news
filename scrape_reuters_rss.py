@@ -33,7 +33,8 @@ from sqlalchemy import create_engine as ce
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # directory for storing backups of database
-DATA_DIR = '/home/nate/Dropbox/data/postgresql/rss_feeds/'
+# DATA_DIR = '/home/nate/Dropbox/data/postgresql/rss_feeds/'
+DATA_DIR = '/media/nate/bigdata1/onedrive/data/postgresql/rss_feeds/'
 
 # nlp = spacy.load('en')
 nlp = spacy.load('en_core_web_lg')
@@ -387,12 +388,15 @@ def scrape_story(story_df):
             sent_df.to_sql(tablename, con=engine, if_exists='append', index=False)
 
 
-def scrape_all_stories(rss_df):
+def scrape_all_stories(rss_df=None):
     """
     takes rss_df from load_rss() and scrapes the story text and gets sentiment for each
 
     scrape_story() only scrapes the story if it's not already in the DB
     """
+    if rss_df is None:
+        rss_df = load_rss()
+
     for i, r in rss_df.iterrows():
         scrape_story(r)
 
